@@ -1,5 +1,7 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../widgets/common.dart';
 import '../main.dart';
@@ -22,6 +24,7 @@ class _ReportScreenState extends State<ReportScreen> {
   double? longitude;
 
   bool locating = false;
+  bool submitting = false;
 
   String locationMessage = 'GPS coordinates not selected yet.';
 
@@ -32,8 +35,16 @@ class _ReportScreenState extends State<ReportScreen> {
     super.dispose();
   }
 
+  void showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
   Future<void> getCurrentLocation() async {
-    if (locating) return;
+    if (locating || submitting) return;
 
     setState(() {
       locating = true;
@@ -41,7 +52,8 @@ class _ReportScreenState extends State<ReportScreen> {
     });
 
     try {
-      final enabled = await Geolocator.isLocationServiceEnabled();
+      final enabled =
+          await Geolocator.isLocationServiceEnabled();
 
       if (!enabled) {
         throw Exception('Device location is disabled.');
@@ -55,7 +67,9 @@ class _ReportScreenState extends State<ReportScreen> {
 
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        throw Exception('Please allow location access in Chrome.');
+        throw Exception(
+          'Please allow location access in Chrome.',
+        );
       }
 
       final position = await Geolocator.getCurrentPosition(
@@ -94,29 +108,88 @@ class _ReportScreenState extends State<ReportScreen> {
     }
   }
 
-  void submitReport() {
-    if (description.text.trim().isEmpty || location.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter description and location.')),
+  Future<void> submitReport() async {
+    if (submitting || locating) return;
+
+    final incidentDescription = description.text.trim();
+    final incidentLocation = location.text.trim();
+
+    if (incidentDescription.isEmpty ||
+        incidentLocation.isEmpty) {
+      showMessage(
+        'Please enter description and location.',
       );
       return;
     }
 
-    appStore.add(
-      category: category,
-      severity: severity,
-      description: description.text.trim(),
-      location: location.text.trim(),
-      latitude: latitude,
-      longitude: longitude,
-    );
+    // Check Firebase Authentication.
+    final user = FirebaseAuth.instance.currentUser;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Demo report submitted successfully!')),
-    );
+    if (user == null) {
+      showMessage(
+        'Please login before submitting a report.',
+      );
+      return;
+    }
 
-    // Reporter dashboard includes submitted reports.
-    replace(context, '/reporter-dashboard');
+    setState(() {
+      submitting = true;
+    });
+
+    try {
+      // Save the incident in Firestore.
+      final reportReference =
+          await FirebaseFirestore.instance
+              .collection('incidents')
+              .add({
+        'userId': user.uid,
+        'category': category,
+        'severity': severity,
+        'description': incidentDescription,
+        'location': incidentLocation,
+        'latitude': latitude,
+        'longitude': longitude,
+        'status': 'Reported',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      debugPrint(
+        'Incident saved to Firestore: ${reportReference.id}',
+      );
+
+      // Keep existing dashboard data working
+      // until it is connected to Firestore.
+      appStore.add(
+        category: category,
+        severity: severity,
+        description: incidentDescription,
+        location: incidentLocation,
+        latitude: latitude,
+        longitude: longitude,
+      );
+
+      if (!mounted) return;
+
+      showMessage(
+        'Incident report submitted successfully!',
+      );
+
+      replace(context, '/reporter-dashboard');
+    } on FirebaseException catch (error) {
+      showMessage(
+        'Firestore error: ${error.code}',
+      );
+    } catch (error) {
+      showMessage(
+        'Could not submit report: $error',
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          submitting = false;
+        });
+      }
+    }
   }
 
   @override
@@ -129,7 +202,10 @@ class _ReportScreenState extends State<ReportScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          screenTitle('Report Problem', subtitle: 'Tell us what happened'),
+          screenTitle(
+            'Report Problem',
+            subtitle: 'Tell us what happened',
+          ),
 
           sectionTitle('Incident Category'),
 
@@ -147,11 +223,13 @@ class _ReportScreenState extends State<ReportScreen> {
                 ChoiceChip(
                   label: Text(item),
                   selected: category == item,
-                  onSelected: (_) {
-                    setState(() {
-                      category = item;
-                    });
-                  },
+                  onSelected: submitting
+                      ? null
+                      : (_) {
+                          setState(() {
+                            category = item;
+                          });
+                        },
                 ),
             ],
           ),
@@ -161,22 +239,32 @@ class _ReportScreenState extends State<ReportScreen> {
           Wrap(
             spacing: 8,
             children: [
-              for (final item in ['Low', 'Medium', 'High'])
+              for (final item in [
+                'Low',
+                'Medium',
+                'High',
+              ])
                 ChoiceChip(
                   label: Text(item),
                   selected: severity == item,
-                  onSelected: (_) {
-                    setState(() {
-                      severity = item;
-                    });
-                  },
+                  onSelected: submitting
+                      ? null
+                      : (_) {
+                          setState(() {
+                            severity = item;
+                          });
+                        },
                 ),
             ],
           ),
 
           const SizedBox(height: 20),
 
-          entry('Incident Description', description, lines: 4),
+          entry(
+            'Incident Description',
+            description,
+            lines: 4,
+          ),
 
           const SizedBox(height: 12),
 
@@ -191,20 +279,28 @@ class _ReportScreenState extends State<ReportScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
                 children: [
                   const Text(
                     'Attach GPS Coordinates',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
                   ),
 
                   const SizedBox(height: 8),
 
-                  Text(locationMessage, style: const TextStyle(fontSize: 13)),
+                  Text(
+                    locationMessage,
+                    style: const TextStyle(fontSize: 13),
+                  ),
 
                   const SizedBox(height: 12),
 
-                  if (latitude != null && longitude != null) ...[
+                  if (latitude != null &&
+                      longitude != null) ...[
                     Text(
                       'Latitude: '
                       '${latitude!.toStringAsFixed(6)}',
@@ -213,13 +309,16 @@ class _ReportScreenState extends State<ReportScreen> {
                       'Longitude: '
                       '${longitude!.toStringAsFixed(6)}',
                     ),
+
                     const SizedBox(height: 12),
                   ],
 
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: locating ? null : getCurrentLocation,
+                      onPressed: locating || submitting
+                          ? null
+                          : getCurrentLocation,
                       icon: const Icon(Icons.my_location),
                       label: Text(
                         locating
@@ -233,10 +332,14 @@ class _ReportScreenState extends State<ReportScreen> {
 
                   const Text(
                     'Use GPS only if you are at the '
-                    'incident location. Otherwise enter '
-                    'the incident location name without '
-                    'attaching your current coordinates.',
-                    style: TextStyle(color: Colors.blueGrey, fontSize: 12),
+                    'incident location. Otherwise '
+                    'enter the incident location '
+                    'name without attaching '
+                    'your current coordinates.',
+                    style: TextStyle(
+                      color: Colors.blueGrey,
+                      fontSize: 12,
+                    ),
                   ),
                 ],
               ),
@@ -247,27 +350,45 @@ class _ReportScreenState extends State<ReportScreen> {
 
           panel(
             child: const ListTile(
-              leading: Icon(Icons.add_a_photo, color: blue),
+              leading: Icon(
+                Icons.add_a_photo,
+                color: blue,
+              ),
               title: Text('Add Photo'),
               subtitle: Text(
-                'Photo selection and upload '
-                'will be added later.',
+                'Photo upload will be added later.',
               ),
             ),
           ),
 
           const SizedBox(height: 25),
 
-          primaryButton('Submit Report', submitReport),
+          if (submitting)
+            const Center(
+              child: Column(
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 12),
+                  Text('Submitting incident report...'),
+                ],
+              ),
+            )
+          else
+            primaryButton(
+              'Submit Report',
+              submitReport,
+            ),
 
           const SizedBox(height: 12),
 
           const Text(
-            'Prototype: Report is saved locally '
-            'in app memory. Firebase database '
-            'integration is not connected yet.',
+            'Incident reports are saved securely '
+            'to Firebase Cloud Firestore.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.blueGrey, fontSize: 11),
+            style: TextStyle(
+              color: Colors.blueGrey,
+              fontSize: 11,
+            ),
           ),
         ],
       ),
